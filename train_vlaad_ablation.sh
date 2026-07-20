@@ -34,6 +34,7 @@ TEST_CASE="${1:-2}"          # default case if no arg given
 WINNING_SCOPE="full"         # scope used by cases 9 & 10 (set after cases 1-8)
 CONDA_ENV="simlingo"
 WORK_DIR="/home/asidhu7/github_workspace/simlingo"
+WANDB_PROJECT_NAME="VLAAD"   # same project as TF++ (team_code/shell_train.sh) so both live together
 WANDB_GROUP="Simlingo"   # groups every run below in the wandb UI
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 # Set the GPUs to use
 # ===================
@@ -52,6 +53,9 @@ export PYTHONPATH="${PYTHONPATH:-}:${WORK_DIR}"
 export MASTER_ADDR=localhost
 export OPENBLAS_NUM_THREADS=1        # no numpy multithreading
 export WANDB__SERVICE_WAIT=300
+export NCCL_P2P_DISABLE=1 
+export NCCL_IB_DISABLE=1 
+export NCCL_DEBUG=INFO
 
 # ---- per-case configuration ----
 SCOPE=""; MODE=""; INJECTION=""; NAME=""; EXTRA=""
@@ -84,12 +88,12 @@ if [[ "${MODE}" != "off" && -n "${INJECTION}" ]]; then INJ_ARG="model.vlaad.inje
 # plus a secondary injection tag for filtering. Hydra list syntax (no spaces): wandb_tags=[a,b,c]
 TAGS="${NAME}"
 if [[ "${MODE}" != "off" && -n "${INJECTION}" ]]; then TAGS="${TAGS},inj-${INJECTION}"; fi
-WANDB_ARGS="wandb_group=${WANDB_GROUP} wandb_tags=[${TAGS}]"
+WANDB_ARGS="wandb_project=${WANDB_PROJECT_NAME} wandb_group=${WANDB_GROUP} wandb_tags=[${TAGS}]"
 
 echo "=========================================================="
 echo " TEST_CASE=${TEST_CASE}  ->  scope=${SCOPE}  mode=${MODE}  injection=${INJECTION:-n/a}"
 echo " run name : ${NAME}"
-echo " wandb    : group=${WANDB_GROUP}  tags=[${TAGS}]"
+echo " wandb    : project=${WANDB_PROJECT_NAME}  group=${WANDB_GROUP}  tags=[${TAGS}]"
 echo "=========================================================="
 
 # shellcheck disable=SC2086
