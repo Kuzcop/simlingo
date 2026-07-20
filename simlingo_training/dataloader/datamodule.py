@@ -65,7 +65,7 @@ class DataModule(LightningDataModule):
         else:
             self.tokenizer = self.processor
         # TODO: not needed anymore?
-        self.tokenizer.add_special_tokens({'additional_special_tokens': ['<WAYPOINTS>','<WAYPOINTS_DIFF>', '<ORG_WAYPOINTS_DIFF>', '<ORG_WAYPOINTS>', '<WAYPOINT_LAST>', '<ROUTE>', '<ROUTE_DIFF>', '<TARGET_POINT>']})
+        self.tokenizer.add_special_tokens({'additional_special_tokens': ['<WAYPOINTS>','<WAYPOINTS_DIFF>', '<ORG_WAYPOINTS_DIFF>', '<ORG_WAYPOINTS>', '<WAYPOINT_LAST>', '<ROUTE>', '<ROUTE_DIFF>', '<TARGET_POINT>', '<VLAAD>']})
         self.tokenizer.padding_side = "left"
 
     def setup(self, stage=None):
@@ -316,6 +316,11 @@ class DataModule(LightningDataModule):
             qa_templates = None
             eval_infos = None
         
+        # VLAAD: stack per-frame embeddings into [B, 768]; None when disabled.
+        vlaad_embedding = None
+        if getattr(data[0], 'vlaad_embedding', None) is not None:
+            vlaad_embedding = torch.stack([data[i].vlaad_embedding for i in range(BS)]).float()
+
         driving_input=DrivingInput(
                 camera_images=image_ff_pixel,  # [B, T, N, C, H, W] uint8 [0, 255]
                 image_sizes=image_ff_sizes,
@@ -325,6 +330,7 @@ class DataModule(LightningDataModule):
                 target_point=torch.tensor(np.asarray([data[i].target_points for i in range(len(data))])).float(),  # [B, 2] float32
                 prompt=prompt_languagelabel,
                 prompt_inference=prompt_question_languagelabel,
+                vlaad_embedding=vlaad_embedding,  # [B, 768] float32 or None
             )
 
         driving_label=DrivingLabel(

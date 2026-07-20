@@ -15,8 +15,9 @@ from torch.optim import AdamW
 from hydra.utils import get_original_cwd
 
 
-from simlingo_training.models.adaptors.adaptors import DrivingAdaptor, LanguageAdaptor, WaypointInputAdaptor, AdaptorList
+from simlingo_training.models.adaptors.adaptors import DrivingAdaptor, LanguageAdaptor, WaypointInputAdaptor, AdaptorList, VectorInputAdaptor
 from simlingo_training.models.utils import summarise_losses
+from simlingo_training.models.vlaad.collision_model import SupervisedAnomalyDetector
 from simlingo_training.utils.custom_types import (DrivingExample, DrivingInput,
                                                 DrivingLabel, DrivingOutput,
                                                 TrainingOutput)
@@ -100,6 +101,105 @@ class DrivingModel(pl.LightningModule):
         else:
             self.tokenizer = self.processor
 
+        # ------------------------------------------------------------------
+        # VLAAD collision/anomaly signal (ported from carla_garage TF++).
+        # ------------------------------------------------------------------
+        vlaad = getattr(self, 'vlaad', None)
+        self.vlaad_mode = getattr(vlaad, 'mode', 'off') if vlaad is not None else 'off'
+        self.vlaad_injection = getattr(vlaad, 'injection', 'numeric') if vlaad is not None else 'numeric'
+        self.vlaad_trainable_scope = (
+            getattr(vlaad, 'trainable_scope', 'full') if vlaad is not None else 'full')
+        # The model only builds/uses the frozen detector + vlaad_encoder for the NUMERIC-slot path.
+        # For 'text' injection the risk is verbalized in the dataloader, so the model does nothing.
+        self._vlaad_numeric = (self.vlaad_mode != 'off' and self.vlaad_injection == 'numeric')
+        if self._vlaad_numeric:
+            assert self.vlaad_mode in ('logit', 'projected'), \
+                f"vlaad.mode must be one of off|logit|projected, got {self.vlaad_mode}"
+            input_dim = getattr(vlaad, 'input_dim', 768)
+            hidden_dim = getattr(vlaad, 'hidden_dim', 256)
+            enc_hidden = getattr(vlaad, 'encoder_hidden_size', 256)
+
+            # Frozen collision head over the 768-d X-CLIP embedding.
+            self.vlaad_detector = SupervisedAnomalyDetector(
+                input_dim=input_dim, hidden_dim=hidden_dim, use_uncertainty_weighting=False)
+            ckpt_path = getattr(vlaad, 'checkpoint_path', None)
+            if ckpt_path is not None:
+                checkpoint = torch.load(ckpt_path, map_location='cpu')
+                state = checkpoint.get('anomaly_head_state_dict', checkpoint)
+                missing, unexpected = self.vlaad_detector.load_state_dict(state, strict=False)
+                print(f"[VLAAD] loaded anomaly head from {ckpt_path} "
+                      f"(missing={list(missing)}, unexpected={list(unexpected)})")
+            else:
+                print("[VLAAD] WARNING: no checkpoint_path given; anomaly head is randomly initialised.")
+            self.vlaad_detector.eval()
+            for p in self.vlaad_detector.parameters():
+                p.requires_grad = False
+
+            # Learnable adaptor: (logit | projected) -> one LLM token.
+            vlaad_input_size = 1 if self.vlaad_mode == 'logit' else input_dim
+            self.vlaad_encoder = VectorInputAdaptor(
+                input_size=vlaad_input_size,
+                token_size=self.language_model.hidden_size,
+                hidden_size=enc_hidden,
+            )
+
+        self._apply_trainable_scope()
+
+
+    def _apply_trainable_scope(self):
+        """Freeze/unfreeze modules per self.vlaad_trainable_scope.
+
+        The frozen VLAAD detector is NEVER trainable. 'full' leaves upstream trainability
+        untouched (LoRA on the LLM + adaptors + heads + vision, per their own flags).
+        """
+        scope = self.vlaad_trainable_scope
+        if scope == 'full':
+            if self._vlaad_numeric:
+                for p in self.vlaad_detector.parameters():
+                    p.requires_grad = False
+            return
+
+        valid = ('heads', 'heads_llm', 'llm')
+        assert scope in valid, f"vlaad.trainable_scope must be full|{'|'.join(valid)}, got {scope}"
+
+        for p in self.parameters():
+            p.requires_grad = False
+
+        # The VLAAD input adaptor is randomly initialized, so it is ALWAYS trained whenever the
+        # numeric slot is on (freezing it would leave the VLAAD signal meaningless).
+        trainable = []
+        if self._vlaad_numeric:
+            trainable.append(self.vlaad_encoder)
+        # 'heads'/'heads_llm' co-train the driving output heads (route + speed waypoints) together
+        # with the target-point INPUT adaptor (wp_encoder), keeping input-conditioning and output-
+        # decoding consistent. 'llm' leaves them frozen and tunes the LLM (LoRA) only.
+        if scope in ('heads', 'heads_llm'):
+            trainable += [self.adaptors.driving, self.wp_encoder]
+        for m in trainable:
+            for p in m.parameters():
+                p.requires_grad = True
+
+        if scope in ('heads_llm', 'llm'):
+            # The LLM is fine-tuned via its LoRA adapters (the pretrained checkpoint is a LoRA
+            # checkpoint); we do NOT full-unfreeze the 0.5B base. Requires language_model.lora=True.
+            n_lora = 0
+            for n, p in self.language_model.named_parameters():
+                if 'lora' in n.lower():
+                    p.requires_grad = True
+                    n_lora += 1
+            assert n_lora > 0, (
+                f"vlaad.trainable_scope='{scope}' but no LoRA params found; "
+                "set model.language_model.lora=True.")
+
+        # frozen VLAAD head always stays frozen
+        if self._vlaad_numeric:
+            for p in self.vlaad_detector.parameters():
+                p.requires_grad = False
+
+        n_train = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        n_total = sum(p.numel() for p in self.parameters())
+        print(f"[VLAAD] trainable_scope='{scope}': {n_train:,}/{n_total:,} params trainable")
+
 
     def forward(self,
         example: DrivingExample,
@@ -122,6 +222,10 @@ class DrivingModel(pl.LightningModule):
                     pixel_values = driving_input.camera_images,
                     placeholder_values = driving_input.prompt_inference.placeholder_values,
                     wp_encoder = self.wp_encoder,
+                    vlaad_detector = getattr(self, 'vlaad_detector', None),
+                    vlaad_encoder = getattr(self, 'vlaad_encoder', None),
+                    vlaad_embedding = driving_input.vlaad_embedding,
+                    vlaad_mode = self.vlaad_mode if self._vlaad_numeric else 'off',
                 )
             
             input_embeds_all = adaptor_dict["language_inputs"]
@@ -202,6 +306,10 @@ class DrivingModel(pl.LightningModule):
             pixel_values = driving_input.camera_images,
             placeholder_values = driving_input.prompt.placeholder_values,
             wp_encoder = self.wp_encoder,
+            vlaad_detector = getattr(self, 'vlaad_detector', None),
+            vlaad_encoder = getattr(self, 'vlaad_encoder', None),
+            vlaad_embedding = driving_input.vlaad_embedding,
+            vlaad_mode = self.vlaad_mode if self._vlaad_numeric else 'off',
         )
 
         position_ids = None

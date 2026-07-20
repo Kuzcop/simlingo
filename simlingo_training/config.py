@@ -25,6 +25,43 @@ class LanguageModelConfig:
 
 
 @dataclass
+class VlaadConfig:
+    """VLAAD collision/anomaly signal injection (ported from carla_garage TF++).
+
+    - mode == 'off':        no VLAAD signal (default; identical to upstream SimLingo).
+    - mode == 'logit':      feed the 1-d frozen collision logit as one extra <VLAAD> token.
+    - mode == 'projected':  feed the 768-d frozen projected feature as one extra <VLAAD> token.
+
+    ``checkpoint_path`` points at the converted VLAAD bundle
+    (carla_garage/team_code/vlaad/convert_checkpoint.py); only ``anomaly_head_state_dict``
+    is loaded into the frozen SupervisedAnomalyDetector.
+
+    ``trainable_scope`` (frozen VLAAD head is NEVER trained; vlaad_encoder is ALWAYS trained
+    when the numeric slot is on — it is randomly initialized):
+      - 'full':      upstream regime — LoRA + adaptors + heads + vision + vlaad_encoder
+                     (base LLM frozen by PEFT). Matches how SimLingo itself fine-tunes.
+      - 'heads':     vlaad_encoder + driving adaptors/heads (route+speed waypoints) + wp_encoder
+                     (target-point input adaptor); LLM & vision frozen.
+      - 'heads_llm': 'heads' + the LLM's LoRA adapters (vision frozen).
+      - 'llm':       vlaad_encoder + the LLM's LoRA adapters only (heads, wp_encoder, vision frozen).
+    """
+    mode: str = "off"  # off | logit | projected
+    # How the signal enters the LLM:
+    #   'numeric' — the frozen head's (logit|projected) feature fills a <VLAAD> token slot via the
+    #               interleaver (learned vlaad_encoder; full signal, not human-readable).
+    #   'text'    — the frozen head's collision logit is verbalized (e.g. "Collision risk: high.")
+    #               and appended to the text prompt. No <VLAAD> token / vlaad_encoder / splice.
+    #               Runs the tiny frozen detector in the dataloader. 'mode' picks the numeric
+    #               feature for the 'numeric' path; the 'text' path always verbalizes the logit.
+    injection: str = "numeric"  # numeric | text
+    checkpoint_path: Optional[str] = None
+    input_dim: int = 768
+    hidden_dim: int = 256
+    encoder_hidden_size: int = 256
+    trainable_scope: str = "full"  # full | heads | heads_llm | llm
+
+
+@dataclass
 class DrivingModelConfig:
     vision_model: Any
     language_model: Any
@@ -36,6 +73,8 @@ class DrivingModelConfig:
     pct_start: float = 0.05
     speed_wps_mode: str = '2d'
     predict_route_as_wps: bool = True
+
+    vlaad: VlaadConfig = field(default_factory=VlaadConfig)
 
     _target_: str = "simlingo_training.models.driving.DrivingModel"
 
@@ -72,6 +111,21 @@ class DatasetBaseConfig:
 
     route_as: str = 'target_point_command' # target_point_command, target_point, command
     use_lmdrive_commands: bool = True
+
+    # Route discovery glob relative to data_path. Default is SimLingo's native 4-level layout;
+    # for a TransFuser++ dataset (<root>/<Scenario>/Town*) set route_glob: '*/Town*'.
+    route_glob: str = 'data/simlingo/*/*/*/Town*'
+    # Town-name-regex holdout (carla_garage style). When set (e.g. 'Town13'), val = routes whose
+    # dir name matches it, train = the rest. Overrides the routes_training/validation substring split.
+    holdout_town: Optional[str] = None
+    # VLAAD: when != 'off', the dataset loads embeddings/NNNN.pt for the current frame.
+    # Kept in sync with model.vlaad.* by train.py.
+    vlaad_mode: str = "off"
+    vlaad_injection: str = "numeric"  # numeric | text (see VlaadConfig)
+    # Used only by the 'text' injection path to run the frozen detector in the dataloader:
+    vlaad_checkpoint_path: Optional[str] = None
+    vlaad_input_dim: int = 768
+    vlaad_hidden_dim: int = 256
 
 @dataclass
 class DrivingDatasetConfig:
@@ -126,6 +180,7 @@ class TrainConfig:
 
     debug: bool = False
     overfit: int = 0
+    fast_dev_run: int = 0  # >0 runs N train+val batches with no logging/checkpointing (smoke test)
     fp16_loss_scale: float = 32.0 # 0.0 means dynamic loss scaling, only used with deepspeed
 
     enable_wandb: bool = True

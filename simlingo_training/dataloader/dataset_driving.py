@@ -272,6 +272,31 @@ class Data_Driving(BaseDataset):  # pylint: disable=locally-disabled, invalid-na
         prompt = prompt.replace('..', '.')
 
         ######################################################
+        ################## load VLAAD embedding ##############
+        ######################################################
+        # Precomputed 768-d X-CLIP video embedding for the current frame, produced offline by
+        # carla_garage/team_code/vlaad/extract_embeddings.py -> route/embeddings/NNNN.pt.
+        # Two injection styles (config model.vlaad.injection):
+        #   'numeric' — emit one <VLAAD> token; its embedding is replaced by the frozen head +
+        #               vlaad_encoder inside replace_placeholder_tokens (embedding passed to model).
+        #   'text'    — run the frozen head here, verbalize the collision logit into the prompt;
+        #               no token/embedding passed to the model.
+        vlaad_embedding = None
+        if getattr(self, 'vlaad_mode', 'off') != 'off':
+            embedding_path = measurement_file_current.replace(
+                '/measurements/', f'/{self.embeddings_dirname}/').replace('.json.gz', '.pt')
+            emb = torch.load(embedding_path, map_location='cpu', weights_only=True).float()
+            if getattr(self, 'vlaad_injection', 'numeric') == 'text':
+                with torch.no_grad():
+                    _, logit = self.vlaad_text_detector(emb)
+                p = torch.sigmoid(logit).item()
+                level = 'low' if p < 0.33 else ('moderate' if p < 0.66 else 'high')
+                prompt = f"{prompt} Collision risk: {level}."
+            else:
+                vlaad_embedding = emb
+                prompt = f"{prompt} <VLAAD>"
+
+        ######################################################
         ######## load current and past images ########
         ######################################################
         data = self.load_images(data, images, augment_sample=augment_sample)
@@ -316,6 +341,7 @@ class Data_Driving(BaseDataset):  # pylint: disable=locally-disabled, invalid-na
             placeholder_values = placeholder_values,
             measurement_path = data['measurement_path'],
             dataset = 'driving',
+            vlaad_embedding = vlaad_embedding,
         )
         
         if VIZ_DATA:

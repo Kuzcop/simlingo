@@ -26,6 +26,7 @@ from tqdm import tqdm
 import simlingo_training.utils.transfuser_utils as t_u
 from simlingo_training.utils.custom_types import DatasetOutput
 from simlingo_training.utils.projection import get_camera_intrinsics, project_points
+from simlingo_training.models.vlaad.collision_model import SupervisedAnomalyDetector
 
 VIZ_DATA = False
 
@@ -43,6 +44,37 @@ class BaseDataset(Dataset):  # pylint: disable=locally-disabled, invalid-name
             setattr(self, key, value)
 
         self.tfs = image_augmenter(prob=self.img_augmentation_prob)
+
+        # Resolve the per-route embeddings subdir from the VLAAD checkpoint (mirrors TF++
+        # train.py: the checkpoint's 'embeddings_dirname' records which X-CLIP variant produced
+        # the on-disk embeddings, so the folder MUST match the head — a frozen/stock head reads
+        # 'embeddings/', a fine-tuned-X-CLIP head reads 'embeddings_<stem>/'). Fallback 'embeddings'.
+        self.embeddings_dirname = 'embeddings'
+        if getattr(self, 'vlaad_mode', 'off') != 'off':
+            _ck = getattr(self, 'vlaad_checkpoint_path', None)
+            if _ck is not None:
+                _meta = torch.load(_ck, map_location='cpu', weights_only=False)
+                if isinstance(_meta, dict):
+                    self.embeddings_dirname = _meta.get('embeddings_dirname', 'embeddings') or 'embeddings'
+            print(f"[VLAAD] reading embeddings from per-route subdir: '{self.embeddings_dirname}'")
+
+        # VLAAD 'text' injection: run the tiny frozen collision head in the dataloader to
+        # verbalize the risk into the prompt. (The 'numeric' path builds the head in the model.)
+        self.vlaad_text_detector = None
+        if getattr(self, 'vlaad_mode', 'off') != 'off' and getattr(self, 'vlaad_injection', 'numeric') == 'text':
+            self.vlaad_text_detector = SupervisedAnomalyDetector(
+                input_dim=getattr(self, 'vlaad_input_dim', 768),
+                hidden_dim=getattr(self, 'vlaad_hidden_dim', 256),
+                use_uncertainty_weighting=False)
+            ckpt = getattr(self, 'vlaad_checkpoint_path', None)
+            if ckpt is not None:
+                sd = torch.load(ckpt, map_location='cpu')
+                self.vlaad_text_detector.load_state_dict(sd.get('anomaly_head_state_dict', sd), strict=False)
+            else:
+                print("[VLAAD] WARNING: text injection with no checkpoint_path; risk head is random.")
+            self.vlaad_text_detector.eval()
+            for p in self.vlaad_text_detector.parameters():
+                p.requires_grad = False
 
         filter_infractions_per_route = True
 
@@ -187,8 +219,11 @@ class BaseDataset(Dataset):  # pylint: disable=locally-disabled, invalid-name
                         run_id_dict[run_id_absolut].append(run_id_name)
 
 
-        route_dirs = glob.glob(f"{repo_path}/" + self.data_path + '/data/simlingo/*/*/*/Town*')
-        print(f'Found {len(route_dirs)} routes in {repo_path + self.data_path}')
+        route_glob = getattr(self, 'route_glob', 'data/simlingo/*/*/*/Town*')
+        # data_path may be relative to the repo (SimLingo default) or an absolute path (e.g. a TF++ root).
+        data_base = self.data_path if os.path.isabs(self.data_path) else f"{repo_path}/{self.data_path}"
+        route_dirs = glob.glob(os.path.join(data_base, route_glob))
+        print(f'Found {len(route_dirs)} routes in {data_base}')
         
         if not self.use_old_towns:
             route_dirs = [route_dir for route_dir in route_dirs if 'lb1_split' not in route_dir]
@@ -200,7 +235,19 @@ class BaseDataset(Dataset):  # pylint: disable=locally-disabled, invalid-name
 
         random.shuffle(route_dirs)
         split_percentage = 0.99
-        if dreamer or not self.use_town13:
+        holdout_town = getattr(self, 'holdout_town', None)
+        if holdout_town is not None:
+            # carla_garage-style holdout by town name in the route dir (e.g. 'Town13').
+            # Used for TransFuser++ data whose paths lack the routes_training/validation substrings.
+            import re as _re
+            is_holdout = lambda p: _re.search(holdout_town, os.path.basename(p.rstrip('/'))) is not None
+            if self.split == "train":
+                print(f"Holdout split: training on routes NOT matching {holdout_town}")
+                route_dirs = [route_dir for route_dir in route_dirs if not is_holdout(route_dir)]
+            elif self.split == "val":
+                print(f"Holdout split: validating on routes matching {holdout_town}")
+                route_dirs = [route_dir for route_dir in route_dirs if is_holdout(route_dir)]
+        elif dreamer or not self.use_town13:
             # split the data into official training(Town12 and old Towns) and validation set (Town13)
             if self.split == "train":
                 print("Using Town12 for training")

@@ -28,7 +28,15 @@ def main(cfg: TrainConfig):
         os.environ["WANDB_MODE"] = "offline"
     
     cfg.wandb_name = f"{cfg.wandb_name}_{cfg.name}"
-    
+
+    # Keep the dataset's VLAAD flags in sync with the model's so embeddings/NNNN.pt is loaded
+    # and either the <VLAAD> token (numeric) or a verbalized risk phrase (text) is emitted.
+    cfg.data_module.base_dataset.vlaad_mode = cfg.model.vlaad.mode
+    cfg.data_module.base_dataset.vlaad_injection = cfg.model.vlaad.injection
+    cfg.data_module.base_dataset.vlaad_checkpoint_path = cfg.model.vlaad.checkpoint_path
+    cfg.data_module.base_dataset.vlaad_input_dim = cfg.model.vlaad.input_dim
+    cfg.data_module.base_dataset.vlaad_hidden_dim = cfg.model.vlaad.hidden_dim
+
     processor = AutoProcessor.from_pretrained(cfg.model.vision_model.variant, trust_remote_code=True)
     model_type_name = cfg.model.vision_model.variant.split('/')[1]
     cache_dir = None #f"pretrained/{(model_type_name)}"
@@ -54,7 +62,15 @@ def main(cfg: TrainConfig):
             state_dict = get_fp32_state_dict_from_zero_checkpoint(cfg.checkpoint)
         else:
             state_dict = torch.load(cfg.checkpoint, map_location="cpu")
-        model.load_state_dict(state_dict)
+        # strict=False: the pretrained checkpoint predates the VLAAD modules
+        # (vlaad_encoder / vlaad_detector), so those keys are expected to be missing.
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        missing = [k for k in missing if not k.startswith(('vlaad_encoder', 'vlaad_detector'))]
+        if missing or unexpected:
+            print(f"[checkpoint] non-VLAAD missing keys: {missing}")
+            print(f"[checkpoint] unexpected keys: {unexpected}")
+        else:
+            print("[checkpoint] loaded cleanly (only VLAAD modules newly initialised).")
 
         
     # print config
@@ -148,6 +164,7 @@ def main(cfg: TrainConfig):
             max_epochs=cfg.max_epochs,
             overfit_batches=overfit,
             check_val_every_n_epoch=cfg.val_every_n_epochs,
+            fast_dev_run=(cfg.fast_dev_run if cfg.fast_dev_run > 0 else False),
             # val_check_interval=cfg.val_check_interval,
         )
 

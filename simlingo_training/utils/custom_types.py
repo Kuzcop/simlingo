@@ -17,6 +17,7 @@ class DatasetOutput(NamedTuple):
     dataset: Optional[str]
     qa_templates: Optional[Tuple[str, str]] = None
     eval_infos: Optional[Dict] = None
+    vlaad_embedding: Optional[Tensor] = None  # [768] float32; None when vlaad.mode == 'off'
 
 class LanguageLabel(NamedTuple):
     phrase_ids: Tensor  # [B, max(len(tokens))] int64
@@ -49,6 +50,7 @@ class DrivingInput(NamedTuple):
     target_point: torch.Tensor  # [B, 2] float32
     prompt: LanguageLabel
     prompt_inference: LanguageLabel
+    vlaad_embedding: Optional[torch.Tensor] = None  # [B, 768] float32; None when vlaad.mode == 'off'
 
 class DrivingLabel(NamedTuple):
     waypoints: Tensor  # [B, F, 2] 11 future waypoints 0.2s apart

@@ -24,6 +24,10 @@ class LingoInternVLModel(nn.Module):
         return_dict: Optional[bool] = None,
         placeholder_values: Optional[List[dict]] = None,
         wp_encoder: Optional[nn.Module] = None,
+        vlaad_detector: Optional[nn.Module] = None,
+        vlaad_encoder: Optional[nn.Module] = None,
+        vlaad_embedding: Optional[torch.FloatTensor] = None,
+        vlaad_mode: str = 'off',
     ):
         
         if 'tokenizer' in self.processor.__dict__:
@@ -52,7 +56,14 @@ class LingoInternVLModel(nn.Module):
             
             # 2a replace placeholder
             smallest_added_id = self.tokenizer.additional_special_tokens_ids[0]
-            special_ids = torch.tensor(list(set(input_ids[(input_ids >= smallest_added_id)].tolist())), device=input_ids.device)
+            special_ids_set = set(input_ids[(input_ids >= smallest_added_id)].tolist())
+            # VLAAD uses its own encoder (frozen detector + vlaad_encoder), NOT the shared
+            # wp_encoder coords path, so exclude it from the generic placeholder loop below.
+            vlaad_token_id = None
+            if vlaad_mode != 'off':
+                vlaad_token_id = self.tokenizer.convert_tokens_to_ids('<VLAAD>')
+                special_ids_set.discard(vlaad_token_id)
+            special_ids = torch.tensor(list(special_ids_set), device=input_ids.device)
             # special_ids = torch.tensor(list(set(ids[(ids > 50294)].tolist())), device=ids.device)
             special_ids = special_ids.view(-1, 1, 1)
             batch_size, seq_len = input_ids.shape
@@ -89,6 +100,23 @@ class LingoInternVLModel(nn.Module):
                     start = first_occurrence[pos[1]]
                     end = start + coords_length_org[i]
                     inputs_embeds[pos[0], start:end] = wp_embeds[i]
+
+            # 2a-bis. VLAAD: replace the single <VLAAD> token embedding with the frozen
+            # collision signal. Length-preserving (one token in -> one token out), so the
+            # driving heads' inverse-perm / split_sizes indexing is unaffected.
+            if vlaad_mode != 'off' and vlaad_embedding is not None and vlaad_token_id is not None:
+                emb = vlaad_embedding.to(vlaad_detector.classifier.weight.dtype)
+                with torch.no_grad():
+                    projected, logit = vlaad_detector(emb)
+                if vlaad_mode == 'logit':
+                    vlaad_in = logit.reshape(batch_size, 1)
+                else:
+                    vlaad_in = projected
+                vlaad_tokens = vlaad_encoder(vlaad_in).to(inputs_embeds.dtype)  # [B, 1, C]
+                for b in range(batch_size):
+                    positions = (input_ids[b] == vlaad_token_id).nonzero(as_tuple=True)[0]
+                    if positions.numel() > 0:
+                        inputs_embeds[b, positions[0]] = vlaad_tokens[b, 0]
 
             # 2. Merge text and images
             if pixel_values is not None and input_ids.shape[1] != 1 and pixel_values.size(0) > 0:

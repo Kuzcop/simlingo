@@ -1,0 +1,72 @@
+# @package _global_
+# Fine-tune the FULL SimLingo model (InternVL2-1B) from pretrained epoch=013 weights,
+# DRIVING-ONLY, on a TransFuser++ dataset, with a Town13 holdout and the VLAAD collision signal.
+# Launch:
+#   python simlingo_training/train.py experiment=simlingo_vlaad_tfpp
+defaults:
+  - /data_module: carla_no_buckets
+  - /model/vision_model: vlm
+  - /data_module/base_dataset: dataset
+
+model:
+  lr: 3e-5
+  predict_route_as_wps: True
+  speed_wps_mode: 2d
+  language_model:
+    variant: 'OpenGVLab/InternVL2-1B'
+    lora: True
+    lora_alpha: 64
+    lora_r: 32
+    lora_dropout: 0.1
+  vision_model:
+    variant: 'OpenGVLab/InternVL2-1B'
+
+  # ---- VLAAD collision/anomaly signal ----
+  vlaad:
+    mode: projected            # off | logit | projected  (numeric feature; 'text' verbalizes the logit)
+    injection: numeric         # numeric (<VLAAD> token) | text (verbalized "Collision risk: ..." in prompt)
+    # Converted anomaly-head bundle (carla_garage/team_code/vlaad/convert_checkpoint.py).
+    # frozen_supervised = stock X-CLIP, embeddings_dirname 'embeddings' -> matches the TF++
+    # data's embeddings/ folder (consistency requirement). Do NOT use the full_supervised head
+    # here: it expects a fine-tuned-X-CLIP embeddings dir that this dataset does not have.
+    checkpoint_path: /storage/aman/vlaad_checkpoints/vlaad_frozen_supervised_UW1_seed0_epoch0.pt
+    input_dim: 768
+    hidden_dim: 256
+    encoder_hidden_size: 256
+    trainable_scope: full       # full | heads | heads_llm | llm  (full = SimLingo's own regime)
+
+data_module:
+  batch_size: 2
+  num_workers: 10
+  dreamer_dataset: null        # driving-only: no dreamer stream
+  base_dataset:
+    # TF++ dataset root (absolute path supported). EDIT for the current machine.
+    data_path: /network-storage/aman/tfpp/data
+    route_glob: '*/Town*'      # TF++ layout: <root>/<Scenario>/Town*
+    holdout_town: Town13       # val = Town13 routes, train = the rest
+    bucket_path: database/bucketsv2_simlingo
+    pred_len: 11
+    cut_bottom_quarter: True
+    use_commentary: False      # driving-only
+    use_qa: False              # driving-only
+    img_shift_augmentation: False   # TF++ has the keys+rgb_augmented; off for the first run
+    hist_len: 1
+    route_as: target_point_command
+    use_lmdrive_commands: True
+    use_old_towns: True
+    use_town13: True
+    use_safety_flag: False
+
+# Pretrained SimLingo weights to fine-tune from: the consolidated fp32 file from HF epoch=013.
+# (A directory would be treated as a DeepSpeed checkpoint; the single .pt file is loaded via torch.load.)
+checkpoint: /home/asidhu7/.cache/huggingface/hub/models--RenzKa--simlingo/snapshots/26c7c89e797d4e25bbf640013317af8da26a5454/simlingo/checkpoints/epoch=013.ckpt/pytorch_model.pt
+
+max_epochs: 5
+val_every_n_epochs: 1
+gpus: 8
+seed: 42
+name: simlingo_vlaad_tfpp
+
+hydra:
+  run:
+    dir: outputs/${wandb_name}_${name}

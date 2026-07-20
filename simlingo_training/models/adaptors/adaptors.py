@@ -93,9 +93,37 @@ class WaypointInputAdaptor(nn.Module):
         return x
 
 
+class VectorInputAdaptor(nn.Module):
+    """
+    Takes an input of shape [B, input_size] and returns an output of shape [B, 1, token_size].
+    Ported from simlingo_base_training for the VLAAD signal adaptor:
+    turns the frozen collision head's (1-d logit | 768-d projected) output into ONE LLM token.
+    """
+
+    def __init__(
+        self,
+        input_size: int,
+        token_size: int = 258,
+        hidden_size: int = 256,
+        norm_layer: Optional[nn.Module] = None,
+    ):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.input_size = input_size
+        self.norm_layer = norm_layer
+        self.mlp = nn.Sequential(nn.Linear(input_size, hidden_size), nn.ReLU(True), nn.Linear(hidden_size, token_size))
+
+    def forward(self, x: Tensor) -> Tensor:
+        """Args: x [B, input_size] -> Output [B, 1, token_size]"""
+        if self.norm_layer is not None:
+            x = self.norm_layer(x)
+        x = self.mlp(x).unsqueeze(1)
+        return x
+
+
 class DrivingAdaptor(nn.Module):
-    def __init__(self, 
-                hidden_size: int, 
+    def __init__(self,
+                hidden_size: int,
                 mlp_dim=256, 
                 predict_route_as_wps=False, 
                 speed_wps_mode=False,
