@@ -109,6 +109,8 @@ def main(cfg: TrainConfig):
         project=cfg.wandb_project,
         id=cfg.wandb_name,
         name=cfg.wandb_name,
+        group=cfg.get("wandb_group", None),
+        tags=(list(cfg.wandb_tags) if cfg.get("wandb_tags", None) else None),
         config=OmegaConf.to_container(cfg, resolve=True, throw_on_missing=True),
         resume=resume_wandb,
     )

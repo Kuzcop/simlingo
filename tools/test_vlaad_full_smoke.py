@@ -4,7 +4,7 @@ Run:  conda run -n simlingo python tools/test_vlaad_full_smoke.py
 
 Covers what is verifiable WITHOUT downloading the InternVL2-1B weights:
   1. Edited modules import (adaptors, custom_types, collision_model).
-  2. Hydra composes experiment=simlingo_vlaad_tfpp and the VLAAD flags resolve;
+  2. Hydra composes experiment=simlingo_vlaad and the VLAAD flags resolve;
      train.py's sync line works; the debug experiment defaults to vlaad.mode=off.
   3. Detector contract + VectorInputAdaptor token shape.
   4. Standalone reproduction of the internvl2 splice: the <VLAAD> position embedding is
@@ -29,7 +29,7 @@ from hydra import initialize_config_dir, compose  # noqa: E402
 import simlingo_training.config  # noqa: E402  (register_configs runs on import)
 cfg_dir = os.path.join(REPO, "simlingo_training", "config")
 with initialize_config_dir(config_dir=cfg_dir, version_base="1.1"):
-    cfg = compose(config_name="config", overrides=["experiment=simlingo_vlaad_tfpp"])
+    cfg = compose(config_name="config", overrides=["experiment=simlingo_vlaad"])
 print("model.vlaad:", cfg.model.vlaad)
 assert cfg.model.vlaad.mode == "projected"
 assert cfg.model.vlaad.trainable_scope == "heads_llm"

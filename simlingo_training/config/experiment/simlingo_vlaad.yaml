@@ -2,7 +2,7 @@
 # Fine-tune the FULL SimLingo model (InternVL2-1B) from pretrained epoch=013 weights,
 # DRIVING-ONLY, on a TransFuser++ dataset, with a Town13 holdout and the VLAAD collision signal.
 # Launch:
-#   python simlingo_training/train.py experiment=simlingo_vlaad_tfpp
+#   python simlingo_training/train.py experiment=simlingo_vlaad
 defaults:
   - /data_module: carla_no_buckets
   - /model/vision_model: vlm
@@ -41,7 +41,7 @@ data_module:
   dreamer_dataset: null        # driving-only: no dreamer stream
   base_dataset:
     # TF++ dataset root (absolute path supported). EDIT for the current machine.
-    data_path: /network-storage/aman/tfpp/data
+    data_path: /storage/datasets/carla/data
     route_glob: '*/Town*'      # TF++ layout: <root>/<Scenario>/Town*
     holdout_town: Town13       # val = Town13 routes, train = the rest
     bucket_path: database/bucketsv2_simlingo
@@ -65,8 +65,11 @@ max_epochs: 5
 val_every_n_epochs: 1
 gpus: 8
 seed: 42
-name: simlingo_vlaad_tfpp
+name: simlingo_vlaad
 
 hydra:
   run:
-    dir: outputs/${wandb_name}_${name}
+    # Output dir == the run identifier set per case (script's NAME), so checkpoints land in a
+    # predictable outputs/<name>/checkpoints/ that matches the wandb run/tag. (No timestamp prefix;
+    # re-running the SAME case reuses/overwrites its dir.)
+    dir: outputs/${name}

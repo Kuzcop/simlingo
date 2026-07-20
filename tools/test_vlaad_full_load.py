@@ -19,7 +19,7 @@ import simlingo_training.config  # noqa: E402
 
 cfg_dir = os.path.join(REPO, "simlingo_training", "config")
 with initialize_config_dir(config_dir=cfg_dir, version_base="1.1"):
-    cfg = compose(config_name="config", overrides=["experiment=simlingo_vlaad_tfpp"])
+    cfg = compose(config_name="config", overrides=["experiment=simlingo_vlaad"])
 
 # emulate train.py sync
 cfg.data_module.base_dataset.vlaad_mode = cfg.model.vlaad.mode

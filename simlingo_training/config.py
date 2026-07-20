@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 import time
 
 from hydra.core.config_store import ConfigStore
@@ -185,6 +185,8 @@ class TrainConfig:
 
     enable_wandb: bool = True
     wandb_project: Optional[str] = "simlingo"
+    wandb_group: Optional[str] = None          # groups related runs in the wandb UI (e.g. an ablation)
+    wandb_tags: Optional[List[str]] = None      # filterable tags; CLI: 'wandb_tags=[vlaad,full,logit]'
     if debug:
         wandb_name: Optional[str] = f"debug"
         gpus: int = 1
