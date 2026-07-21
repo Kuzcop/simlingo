@@ -190,6 +190,7 @@ class LLM(nn.Module):
         restrict_tokens: Optional[Tuple[int, int]] = None,
         attention_mask = None,
         position_ids = None,
+        use_cache: bool = True,
     ) -> Tuple[Tensor, int]:
         
         if input_embed_matrix is None:
@@ -214,40 +215,97 @@ class LLM(nn.Module):
 
         # we start with all sequences left to complete
         incomplete_seq_mask = torch.ones(input_embeds.size(0), dtype=torch.bool, device=input_embeds.device)
+
+        if not use_cache:
+            # ---- original O(n^2) path: recompute the full forward over the whole sequence every token.
+            #      Kept for reference / output-equivalence validation against the cached path below. ----
+            for i in range(max_new_tokens):
+                features, logits = self.forward(
+                    embeddings=input_embeds,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                )
+
+                last_hidden_state = features[:, -1]
+
+                # sample the next token
+                logits = F.linear(last_hidden_state, logit_matrix)
+
+                next_token = self.sample_categorical(
+                    logits, temperature=temperature, top_k=top_k, top_p=top_p, restrict_tokens=restrict_tokens
+                )
+                x = F.embedding(next_token.unsqueeze(1), input_embed_matrix)
+
+                input_embeds = torch.cat([input_embeds, x], dim=1)
+                attention_mask = torch.cat([attention_mask, torch.ones((input_embeds.size(0), 1), device=input_embeds.device)], dim=1)
+
+                # only update sequences where we haven't predicted the eos token before
+                sampled_tokens[incomplete_seq_mask, i] = next_token[incomplete_seq_mask]
+
+                if eos_token_id is not None:
+                    # only update the mask of incomplete sequences and stop early if an eos token id is provided.
+                    incomplete_seq_mask = sampled_tokens[:, i] != eos_token_id
+                    if not incomplete_seq_mask.any():
+                        # finished all sequences, early exit
+                        sampled_tokens = sampled_tokens[:, : i + 1]
+                        break
+
+            return sampled_tokens, input_embeds
+
+        # ---- KV-cached O(n) path: prefill the prompt once, then feed ONE new token per step reusing the
+        #      cached keys/values. Mathematically identical to the uncached path (standard incremental
+        #      decoding) -- it only avoids recomputing attention over the whole prefix each step. The full
+        #      embedding sequence is still accumulated and returned so the caller (driving.py) can append
+        #      the driving tokens. Uses the same logit_matrix / input_embed_matrix as above. ----
+        if attention_mask is None:
+            attention_mask = torch.ones(input_embeds.shape[:2], dtype=torch.long, device=input_embeds.device)
+        if position_ids is None:
+            # HF/Qwen2 convention (handles left-padding): positions from the attention mask.
+            position_ids = attention_mask.long().cumsum(-1) - 1
+            position_ids = position_ids.masked_fill(attention_mask == 0, 1)
+
+        full_embeds = input_embeds       # prompt (+ generated tokens); returned to the caller
+        step_embeds = input_embeds       # fed to the model this step: whole prompt first, then one token
+        step_position_ids = position_ids
+        past = None
         for i in range(max_new_tokens):
-            features, logits = self.forward(
-                embeddings=input_embeds, 
-                attention_mask=attention_mask,
-                position_ids=position_ids,
+            outputs = self.model(
+                inputs_embeds=step_embeds,
+                attention_mask=attention_mask,   # full length (past + current); HF expects this
+                position_ids=step_position_ids,
+                past_key_values=past,
+                use_cache=True,
+                output_hidden_states=True,
+                return_dict=True,
             )
+            past = outputs.past_key_values
+            last_hidden_state = outputs.hidden_states[-1][:, -1]
 
-            last_hidden_state = features[:, -1]
-
-            # sample the next token
             logits = F.linear(last_hidden_state, logit_matrix)
-            
             next_token = self.sample_categorical(
                 logits, temperature=temperature, top_k=top_k, top_p=top_p, restrict_tokens=restrict_tokens
             )
             x = F.embedding(next_token.unsqueeze(1), input_embed_matrix)
 
-            input_embeds = torch.cat([input_embeds, x], dim=1)
-            attention_mask = torch.cat([attention_mask, torch.ones((input_embeds.size(0), 1), device=input_embeds.device)], dim=1)
+            full_embeds = torch.cat([full_embeds, x], dim=1)
+            # next step feeds only the new token, at the next position, with a 1-longer attention mask
+            step_embeds = x
+            attention_mask = torch.cat(
+                [attention_mask,
+                 torch.ones((attention_mask.size(0), 1), dtype=attention_mask.dtype, device=attention_mask.device)],
+                dim=1,
+            )
+            step_position_ids = step_position_ids[:, -1:] + 1
 
-            # only update sequences where we haven't predicted the eos token before
             sampled_tokens[incomplete_seq_mask, i] = next_token[incomplete_seq_mask]
-            # For completed sequences, we mask them out for future sampling
-            # self.cache_mask[:, cache_offset - 1] &= incomplete_seq_mask
 
             if eos_token_id is not None:
-                # only update the mask of incomplete sequences and stop early if an eos token id is provided.
                 incomplete_seq_mask = sampled_tokens[:, i] != eos_token_id
                 if not incomplete_seq_mask.any():
-                    # finished all sequences, early exit
                     sampled_tokens = sampled_tokens[:, : i + 1]
                     break
 
-        return sampled_tokens, input_embeds
+        return sampled_tokens, full_embeds
 
 
 if __name__ == "__main__":

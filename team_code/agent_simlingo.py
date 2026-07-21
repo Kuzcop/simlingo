@@ -67,8 +67,13 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         Main class that runs the agents with the run_step function
         """
 
-    def setup(self, path_to_conf_file, route_index=None):
-        """Sets up the agent. route_index is for logging purposes"""
+    def setup(self, path_to_conf_file, route_index=None, traffic_manager=None):
+        """Sets up the agent. route_index is for logging purposes.
+
+        traffic_manager is accepted (and ignored) for compatibility with the standard
+        leaderboard_evaluator_local.py, which calls setup(config, route_date_string, traffic_manager);
+        the Bench2Drive evaluator calls setup(config) with one arg -- both work via the defaults.
+        """
 
         torch.cuda.empty_cache()
         self.track = autonomous_agent.Track.SENSORS
@@ -226,7 +231,9 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
                     roi=self.logger_region_of_interest,
             )
         
-        self.debug_save_path = self.save_path + '/debug_viz' + f'/{self.session}/iter_{self.iter}/{route_type}/{route_number}_{time.strftime("%Y_%m_%d_%H_%M_%S")}'
+        # str(): save_path may be a pathlib.Path (when the evaluator passes a non-None route_index, e.g.
+        # the standard leaderboard_evaluator_local.py) or a str (Bench2Drive flow, route_index=None).
+        self.debug_save_path = str(self.save_path) + '/debug_viz' + f'/{self.session}/iter_{self.iter}/{route_type}/{route_number}_{time.strftime("%Y_%m_%d_%H_%M_%S")}'
         Path(self.debug_save_path).mkdir(parents=True, exist_ok=True)
         self.save_path_metric = self.debug_save_path + '/metric'
         Path(self.save_path_metric).mkdir(parents=True, exist_ok=True)
@@ -799,6 +806,38 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
 
         return control
 
+    def get_metric_info(self):
+        """Privileged ego-actor metrics dumped to metric_info.json each tick.
+
+        Ported from the Bench2Drive AutonomousAgent base (the standard leaderboard base this repo's
+        `leaderboard/` copy provides does NOT define it, yet run_step calls self.get_metric_info()).
+        Self-contained: looks up the 'hero' actor via CarlaDataProvider each call; returns {} if not
+        found so metric logging never aborts the route.
+        """
+        from srunner.scenariomanager.carla_data_provider import CarlaDataProvider
+
+        def vector2list(vector, rotation=False):
+            if rotation:
+                return [vector.roll, vector.pitch, vector.yaw]
+            return [vector.x, vector.y, vector.z]
+
+        hero = None
+        for actor in CarlaDataProvider.get_world().get_actors():
+            if 'role_name' in actor.attributes and actor.attributes['role_name'] == 'hero':
+                hero = actor
+                break
+        if hero is None:
+            return {}
+        transform = hero.get_transform()
+        return {
+            'acceleration': vector2list(hero.get_acceleration()),
+            'angular_velocity': vector2list(hero.get_angular_velocity()),
+            'forward_vector': vector2list(transform.get_forward_vector()),
+            'right_vector': vector2list(transform.get_right_vector()),
+            'location': vector2list(transform.location),
+            'rotation': vector2list(transform.rotation, rotation=True),
+        }
+
     def control_pid(self, route_waypoints, velocity, speed_waypoints):
         """
         Predicts vehicle control with a PID controller.
@@ -864,7 +903,8 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
 
         del self.model
         del self.config
-        if self.cfg.data_module.encoder == 'llavanext':
+        # .get(): some checkpoints' hydra configs (e.g. the HF baseline) have no data_module.encoder key.
+        if self.cfg.data_module.get('encoder', None) == 'llavanext':
             del self.processor
 
 
